@@ -1,4 +1,5 @@
 # weread-calendar（微信读书阅读月历生成器）
+<img width="1448" height="1086" alt="ChatGPT Image 2026年5月23日 10_39_21" src="https://github.com/user-attachments/assets/52aee400-c649-45d4-ab58-3e2c39693ee1" />
 
 一个用于导出微信读书阅读记录，并生成阅读日历可视化的小工具。
 
@@ -82,6 +83,9 @@ python weread_export_fixed_v13.py --png-months 2025-04 2025-05
 ```bash
 python weread_export_fixed_v13.py --zip-png
 ```
+
+<img width="1448" height="1086" alt="ChatGPT Image 2026年5月23日 10_44_19" src="https://github.com/user-attachments/assets/6092df82-e416-42b8-866b-e566ce81d956" />
+
 
 ## 关于微信读书的声明
 
