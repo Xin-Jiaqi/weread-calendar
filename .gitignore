@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+weread_export/
+weread_cookie.txt
+weread_cookies_raw.json
+raw_json/
+*.log
