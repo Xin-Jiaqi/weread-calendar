@@ -1,7 +1,7 @@
 # weread-calendar（微信读书阅读月历生成器）
 <img width="1448" height="1086" alt="ChatGPT Image 2026年5月23日 10_39_21" src="https://github.com/user-attachments/assets/52aee400-c649-45d4-ab58-3e2c39693ee1" />
 
-一个用于导出微信读书阅读记录，并生成阅读日历可视化的小工具。
+一个在本地导出个人阅读记录并生成阅读日历可视化的 Alpha 工具。当前版本已经建立可安装入口、安全回归测试和 Python 3.11–3.14 CI；在线接口仍可能随平台变化。
 
 它可以把你的微信读书阅读数据整理成：
 
@@ -23,19 +23,21 @@
 
 ## 使用方法
 
-安装依赖：
+安装（Python 3.11 或更高版本）：
 
 ```bash
-pip install requests pillow
+python -m pip install -e '.[image]'
 ```
 
 运行脚本：
 
 ```bash
-python weread_export_fixed_v13.py
+weread-calendar
 ```
 
 首次运行时，程序会打开浏览器，请扫码登录微信读书。
+
+Cookie 不再接受命令行参数，因为命令行历史和进程列表可能泄露凭证。无法扫码时使用 `--manual-cookie` 交互粘贴；选择保存时文件权限会限制为当前用户可读写，`--save-raw` 也不会保存 Cookie 值。
 
 默认输出目录为：
 
@@ -84,6 +86,8 @@ python weread_export_fixed_v13.py --png-months 2025-04 2025-05
 python weread_export_fixed_v13.py --zip-png
 ```
 
+如果任何书籍请求失败，程序仍会保留已经完成的输出，但默认返回非零退出码。只有明确接受不完整结果时才使用 `--allow-partial`。
+
 <img width="1448" height="1086" alt="ChatGPT Image 2026年5月23日 10_44_19" src="https://github.com/user-attachments/assets/6092df82-e416-42b8-866b-e566ce81d956" />
 
 
@@ -117,7 +121,7 @@ weread_export/
 
 请妥善保管这些文件，尤其是 Cookie 文件。Cookie 具有登录凭证性质，不要上传到 GitHub，不要分享给他人。
 
-建议在 `.gitignore` 中加入：
+仓库已经提供 `.gitignore`，默认排除：
 
 ```gitignore
 weread_export/
@@ -142,3 +146,5 @@ raw_json/
 ## License
 
 本项目源码仅供个人学习、研究和非商业使用。未经作者许可，不得用于商业服务、批量数据抓取、账号代管、第三方数据分析服务或任何违反微信读书平台规则的用途。
+
+当前仓库尚未添加标准开源许可证，因此不应视为已经授权的开源软件；发布标准许可证前需要由作者确认最终公开范围。

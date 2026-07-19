@@ -37,9 +37,11 @@ MANUAL_COOKIE_HELP = """
 2. 打开开发者工具，进入 Network/网络 面板
 3. 刷新页面，点开任意 weread.qq.com 请求，例如 /api/user/notebook
 4. 在 Request Headers/请求头 里复制整行 Cookie 的值
-5. 重新运行本脚本，按提示粘贴，或使用：
-   python weread_export_fixed.py --cookie "wr_vid=...; wr_skey=..."
+5. 重新运行本脚本，使用交互提示粘贴；不要把 Cookie 放进命令行参数
 """.strip()
+
+COVER_HOST_SUFFIXES = ("qq.com", "qpic.cn", "gtimg.com")
+COVER_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 PROMO_KEYWORDS = [
     "独家首发", "微信读书", "同名", "主演", "之书", "电视剧", "电影", "原著", "果麦",
@@ -87,20 +89,48 @@ def has_login_cookie(cookies: List[Dict[str, Any]]) -> bool:
     return bool(cookie_map.get("wr_vid")) and bool(cookie_map.get("wr_skey"))
 
 
+def write_private_text(path: Path, text: str) -> None:
+    """Write credential-adjacent data with user-only permissions and no symlink follow."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def cookie_metadata(cookies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep diagnostic cookie attributes without authentication values."""
+    safe_keys = ("name", "domain", "path", "secure", "httpOnly", "sameSite", "expires")
+    return [{key: cookie.get(key) for key in safe_keys if key in cookie} for cookie in cookies]
+
+
 def save_cookie_files(cookie_string: str, cookies: List[Dict[str, Any]], cookie_file: Optional[Path], raw_cookie_file: Optional[Path]) -> None:
     if cookie_file:
-        cookie_file.write_text(cookie_string, encoding="utf-8")
+        write_private_text(cookie_file, cookie_string)
     if raw_cookie_file:
-        raw_cookie_file.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_private_text(
+            raw_cookie_file,
+            json.dumps(cookie_metadata(cookies), ensure_ascii=False, indent=2),
+        )
 
 
 def save_manual_cookie(cookie_string: str, cookie_file: Optional[Path], raw_cookie_file: Optional[Path]) -> None:
     if cookie_file:
-        cookie_file.write_text(cookie_string, encoding="utf-8")
+        write_private_text(cookie_file, cookie_string)
     if raw_cookie_file:
-        raw_cookie_file.write_text(
+        write_private_text(
+            raw_cookie_file,
             json.dumps({"source": "manual_cookie", "note": "手动粘贴的 Cookie 只保存请求头字符串。"}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
 
@@ -167,7 +197,7 @@ def read_manual_cookie(cookie_file: Optional[Path], raw_cookie_file: Optional[Pa
     print(MANUAL_COOKIE_HELP)
     print()
     if not sys.stdin.isatty():
-        raise RuntimeError('当前终端不能交互式粘贴 Cookie。请改用：python weread_export_fixed.py --cookie "wr_vid=...; wr_skey=..."')
+        raise RuntimeError("当前终端不能安全地交互式粘贴 Cookie，请使用扫码登录。")
     cookie_string = input("请粘贴 Cookie 后回车：").strip()
     if cookie_string.lower().startswith("cookie:"):
         cookie_string = cookie_string.split(":", 1)[1].strip()
@@ -596,10 +626,40 @@ def normalize_cover_url(value: Any) -> str:
     if not text:
         return ""
     if text.startswith("//"):
-        return "https:" + text
-    if text.startswith("http://") or text.startswith("https://"):
-        return text
-    return ""
+        text = "https:" + text
+    try:
+        parsed = urlparse(text)
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+        port = parsed.port
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
+        return ""
+    if port not in (None, 443):
+        return ""
+    if not any(hostname == suffix or hostname.endswith("." + suffix) for suffix in COVER_HOST_SUFFIXES):
+        return ""
+    return text
+
+
+def read_limited_response(response: requests.Response, max_bytes: int) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                return b""
+        except ValueError:
+            return b""
+    chunks = []
+    size = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        size += len(chunk)
+        if size > max_bytes:
+            return b""
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def find_cover_url(value: Any) -> str:
@@ -854,6 +914,7 @@ def display_book_title(title: str) -> str:
 
 
 def get_cover_color(cover_url: str, cache: Dict[str, str]) -> str:
+    cover_url = normalize_cover_url(cover_url)
     if not cover_url:
         return ""
     if cover_url in cache:
@@ -864,9 +925,17 @@ def get_cover_color(cover_url: str, cache: Dict[str, str]) -> str:
         cache[cover_url] = ""
         return ""
     try:
-        resp = requests.get(cover_url, timeout=8)
-        resp.raise_for_status()
-        image = Image.open(BytesIO(resp.content)).convert("RGB")
+        with requests.get(cover_url, timeout=8, stream=True) as resp:
+            resp.raise_for_status()
+            if not normalize_cover_url(resp.url):
+                raise ValueError("cover redirect left the trusted host set")
+            content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].lower()
+            if content_type not in COVER_CONTENT_TYPES:
+                raise ValueError("unsupported cover content type")
+            content = read_limited_response(resp, 2_000_000)
+        if not content:
+            raise ValueError("empty or oversized cover response")
+        image = Image.open(BytesIO(content)).convert("RGB")
         image.thumbnail((64, 96))
         colors = image.getcolors(maxcolors=64 * 96) or []
         candidates = []
@@ -893,7 +962,7 @@ def image_url_to_data_uri(url: str, cache: Dict[str, str], timeout: int = 8, max
     把远程封面转成 data URI，解决浏览器端 HTML 导出 PNG 时的跨域污染问题。
     如果下载失败或图片过大，返回空字符串，前端会继续使用颜色占位封面。
     """
-    url = str(url or "").strip()
+    url = normalize_cover_url(url)
     if not url:
         return ""
     if url in cache:
@@ -903,6 +972,7 @@ def image_url_to_data_uri(url: str, cache: Dict[str, str], timeout: int = 8, max
         resp = requests.get(
             url,
             timeout=timeout,
+            stream=True,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -912,23 +982,19 @@ def image_url_to_data_uri(url: str, cache: Dict[str, str], timeout: int = 8, max
                 "Referer": "https://weread.qq.com/",
             },
         )
-        resp.raise_for_status()
-        content = resp.content
-        if not content or len(content) > max_bytes:
+        try:
+            resp.raise_for_status()
+            if not normalize_cover_url(resp.url):
+                raise ValueError("cover redirect left the trusted host set")
+            content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type not in COVER_CONTENT_TYPES:
+                raise ValueError("unsupported cover content type")
+            content = read_limited_response(resp, max_bytes)
+        finally:
+            resp.close()
+        if not content:
             cache[url] = ""
             return ""
-
-        content_type = resp.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if not content_type.startswith("image/"):
-            lower = url.lower()
-            if lower.endswith(".png"):
-                content_type = "image/png"
-            elif lower.endswith(".webp"):
-                content_type = "image/webp"
-            elif lower.endswith(".gif"):
-                content_type = "image/gif"
-            else:
-                content_type = "image/jpeg"
 
         data_uri = f"data:{content_type};base64," + base64.b64encode(content).decode("ascii")
         cache[url] = data_uri
@@ -1692,7 +1758,7 @@ def generate_reading_report_html(rows: List[Dict[str, Any]], output_path: Path) 
       const title = book.title || "";
       const color = bookColor(book);
       const src = book.coverData || book.cover || "";
-      if (src) return `<img class="${className}" src="${escapeHtml(src)}" alt="${escapeHtml(title)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(makeCoverFallback('${className}', '${escapeHtml(title).replaceAll("'", "&#039;")}', '${color}'))">`;
+      if (src) return `<img class="${className}" src="${escapeHtml(src)}" alt="${escapeHtml(title)}" loading="lazy" referrerpolicy="no-referrer">`;
       return renderCoverFallback(title, color, className);
     }
     function renderCoverFallback(title, color, className) {
@@ -2213,14 +2279,9 @@ def get_cookie_string(args: argparse.Namespace, out_dir: Path) -> str:
     raw_cookie_file = out_dir / "weread_cookies_raw.json" if args.save_raw else None
 
     if args.cookie:
-        cookie_string = args.cookie.strip()
-        if cookie_string.lower().startswith("cookie:"):
-            cookie_string = cookie_string.split(":", 1)[1].strip()
-        if not verify_cookie(cookie_string):
-            raise RuntimeError("通过 --cookie 提供的 Cookie 验证失败。请确认它来自已登录的 weread.qq.com 请求。")
-        save_manual_cookie(cookie_string, cookie_file, raw_cookie_file)
-        print(f"Cookie 验证成功{f'，已保存到：{cookie_file}' if cookie_file else ''}。")
-        return cookie_string
+        raise RuntimeError(
+            "--cookie 已禁用，因为命令行参数会泄露凭证；请使用扫码登录或 --manual-cookie。"
+        )
 
     if args.save_cookie and cookie_file and cookie_file.exists() and not args.force_login:
         cookie_string = cookie_file.read_text(encoding="utf-8").strip()
@@ -2251,7 +2312,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--login-method", choices=["auto", "browser", "playwright", "manual"], default="auto", help="扫码登录方式")
     parser.add_argument("--manual-cookie", action="store_true", help="不打开浏览器，改为手动粘贴 Cookie")
     parser.add_argument("--no-browser-login", action="store_true", help="不打开浏览器，改为手动粘贴 Cookie")
-    parser.add_argument("--cookie", type=str, default="", help="直接传入微信读书 Cookie 请求头")
+    parser.add_argument("--cookie", type=str, default="", help=argparse.SUPPRESS)
     parser.add_argument("--save-cookie", action="store_true", help="把扫码得到的 Cookie 保存到本地文件；下次会优先复用")
     parser.add_argument("--cookie-file", type=str, default="weread_cookie.txt", help="配合 --save-cookie 使用的 Cookie 文件名")
     parser.add_argument("--profile-dir", type=str, default="", help="指定扫码登录浏览器缓存目录；默认使用临时目录")
@@ -2280,6 +2341,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-monthly", action="store_true", help="额外保存按月汇总 CSV")
     parser.add_argument("--monthly-csv", type=str, default="weread_monthly_summary.csv", help="按月汇总 CSV 文件名")
     parser.add_argument("--save-raw", action="store_true", help="保存接口返回的原始 JSON，方便排查")
+    parser.add_argument("--allow-partial", action="store_true", help="允许部分书籍请求失败时仍返回成功退出码")
     parser.add_argument("--save-debug", action="store_true", help="额外保存无明细书单和错误书单 CSV")
     parser.add_argument("--book-source", choices=["all", "notebook", "shelf", "readdata"], default="all", help="书单来源")
     parser.add_argument("--diagnose-books", nargs="*", default=[], help="按书名关键词检查这些书是否进入抓取书单")
@@ -2752,6 +2814,8 @@ def main() -> None:
     print(f"没有 readDetail.data 的书：{len(no_detail_books)}")
     print(f"请求失败的书：{len(error_books)}")
     print(f"有总时长但无法落到日期的时长：{format_duration(undated_gap_seconds)}")
+    if error_books and not args.allow_partial:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
