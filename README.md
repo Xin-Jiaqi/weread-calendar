@@ -50,9 +50,12 @@ weread_export/
 ```text
 weread_daily_reading.csv       每日阅读数据
 reading_report.html            交互式阅读报告
+weread_run_manifest.json       版本化运行完成度与失败项
 monthly_png/                   每月阅读日历 PNG
 weread_monthly_views.zip        PNG 打包文件
 ```
+
+`weread_run_manifest.json` 使用 schema `1.0`，状态为 `complete`、`partial` 或 `failure`。它只记录输入文件名/哈希、汇总计数、失败 item ID、错误类别和相对输出路径，不写入 Cookie、书名、作者、原始接口响应或本地绝对路径。可用 `--manifest` 修改文件名或路径。
 
 ## 常用参数
 
@@ -87,6 +90,8 @@ python weread_export_fixed_v13.py --zip-png
 ```
 
 如果任何书籍请求失败，程序仍会保留已经完成的输出，但默认返回非零退出码。只有明确接受不完整结果时才使用 `--allow-partial`。
+
+仓库的离线端到端测试使用 `tests/fixtures/synthetic_daily_reading.csv`，其中书名、作者和 ID 均为虚构内容，不包含真实用户数据。
 
 <img width="1448" height="1086" alt="ChatGPT Image 2026年5月23日 10_44_19" src="https://github.com/user-attachments/assets/6092df82-e416-42b8-866b-e566ce81d956" />
 
