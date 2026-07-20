@@ -1,0 +1,3 @@
+日期,总分钟,当天书籍,books_json
+2026-01-02,45,《合成示例甲》45分钟,"[{""bookId"": ""synthetic-001"", ""title"": ""合成示例甲"", ""author"": ""虚构作者甲"", ""seconds"": 2700, ""minutes"": 45}]"
+2026-01-03,30,《合成示例乙》20分钟；《合成示例丙》10分钟,"[{""bookId"": ""synthetic-002"", ""title"": ""合成示例乙"", ""author"": ""虚构作者乙"", ""seconds"": 1200, ""minutes"": 20}, {""bookId"": ""synthetic-003"", ""title"": ""合成示例丙"", ""author"": ""虚构作者丙"", ""seconds"": 600, ""minutes"": 10}]"
