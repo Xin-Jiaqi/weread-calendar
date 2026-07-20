@@ -9,6 +9,33 @@ import pytest
 import weread_export_fixed_v13 as app
 
 
+def test_cookie_selection_uses_exact_domains_and_required_names_only() -> None:
+    cookies = [
+        {"name": "wr_vid", "value": "parent-vid", "domain": ".qq.com"},
+        {"name": "wr_vid", "value": "specific-vid", "domain": ".weread.qq.com"},
+        {"name": "wr_skey", "value": "specific-key", "domain": "weread.qq.com"},
+        {"name": "wr_name", "value": "profile", "domain": ".weread.qq.com"},
+        {"name": "wr_skey", "value": "evil-key", "domain": "weread.qq.com.evil.example"},
+        {"name": "wr_vid", "value": "lookalike", "domain": "evilqq.com"},
+        {"name": "session", "value": "unrelated", "domain": ".qq.com"},
+    ]
+
+    assert app.cookie_list_to_header(cookies) == "wr_vid=specific-vid; wr_skey=specific-key"
+    assert app.has_login_cookie(cookies)
+    assert app.cookie_metadata(cookies) == [
+        {"name": "wr_vid", "domain": ".qq.com"},
+        {"name": "wr_vid", "domain": ".weread.qq.com"},
+        {"name": "wr_skey", "domain": "weread.qq.com"},
+    ]
+
+
+def test_manual_cookie_header_is_reduced_before_use() -> None:
+    raw = "wr_vid=vid; wr_skey=key; wr_name=private-profile; session=unrelated"
+    assert app.sanitize_cookie_header(raw) == "wr_vid=vid; wr_skey=key"
+    session = app.make_session(raw)
+    assert session.cookies.get_dict() == {"wr_vid": "vid", "wr_skey": "key"}
+
+
 def test_cover_url_requires_https_and_trusted_host() -> None:
     assert app.normalize_cover_url("https://cdn.weread.qq.com/cover.jpg")
     assert app.normalize_cover_url("//cdn.weread.qq.com/cover.jpg").startswith("https://")
