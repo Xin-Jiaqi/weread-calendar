@@ -16,7 +16,7 @@ import time
 import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -29,6 +29,11 @@ BASE_URL = "https://weread.qq.com"
 I_BASE_URL = "https://i.weread.qq.com"
 LOGIN_URL = "https://r.qq.com/#login"
 WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+TOOL_NAME = "weread-calendar"
+TOOL_VERSION = "0.1.0a1"
+RUN_MANIFEST_SCHEMA_VERSION = "1.0"
+WEREAD_COOKIE_NAMES = ("wr_vid", "wr_skey")
+WEREAD_COOKIE_DOMAINS = frozenset({"weread.qq.com", "qq.com"})
 
 MANUAL_COOKIE_HELP = """
 无法自动扫码登录时，可以手动复制 Cookie：
@@ -70,23 +75,50 @@ def cookie_string_to_dict(cookie_string: str) -> Dict[str, str]:
     return result
 
 
-def cookie_list_to_header(cookies: List[Dict[str, Any]]) -> str:
-    result: Dict[str, str] = {}
+def normalize_cookie_domain(value: Any) -> str:
+    return str(value or "").strip().lstrip(".").rstrip(".").lower()
+
+
+def is_weread_cookie(cookie: Dict[str, Any]) -> bool:
+    name = str(cookie.get("name") or "")
+    domain = normalize_cookie_domain(cookie.get("domain"))
+    return name in WEREAD_COOKIE_NAMES and domain in WEREAD_COOKIE_DOMAINS
+
+
+def select_weread_cookie_values(cookies: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Select only required cookies, preferring the most specific valid domain."""
+    selected: Dict[str, tuple[int, str]] = {}
     for cookie in cookies:
-        name = cookie.get("name", "")
-        value = cookie.get("value", "")
-        domain = cookie.get("domain", "")
-        if not name or value is None:
+        if not is_weread_cookie(cookie):
             continue
-        if domain and "qq.com" not in domain:
+        name = str(cookie.get("name") or "")
+        value = cookie.get("value")
+        if value in (None, ""):
             continue
-        result[name] = value
-    return "; ".join(f"{name}={value}" for name, value in result.items())
+        domain = normalize_cookie_domain(cookie.get("domain"))
+        candidate = (len(domain), str(value))
+        if name not in selected or candidate[0] > selected[name][0]:
+            selected[name] = candidate
+    return {name: selected[name][1] for name in WEREAD_COOKIE_NAMES if name in selected}
+
+
+def cookie_list_to_header(cookies: List[Dict[str, Any]]) -> str:
+    selected = select_weread_cookie_values(cookies)
+    return "; ".join(f"{name}={selected[name]}" for name in WEREAD_COOKIE_NAMES if name in selected)
+
+
+def sanitize_cookie_header(cookie_string: str) -> str:
+    values = cookie_string_to_dict(cookie_string)
+    return "; ".join(
+        f"{name}={values[name]}"
+        for name in WEREAD_COOKIE_NAMES
+        if values.get(name)
+    )
 
 
 def has_login_cookie(cookies: List[Dict[str, Any]]) -> bool:
-    cookie_map = {c.get("name"): c.get("value") for c in cookies}
-    return bool(cookie_map.get("wr_vid")) and bool(cookie_map.get("wr_skey"))
+    cookie_map = select_weread_cookie_values(cookies)
+    return all(cookie_map.get(name) for name in WEREAD_COOKIE_NAMES)
 
 
 def write_private_text(path: Path, text: str) -> None:
@@ -111,10 +143,15 @@ def write_private_text(path: Path, text: str) -> None:
 def cookie_metadata(cookies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Keep diagnostic cookie attributes without authentication values."""
     safe_keys = ("name", "domain", "path", "secure", "httpOnly", "sameSite", "expires")
-    return [{key: cookie.get(key) for key in safe_keys if key in cookie} for cookie in cookies]
+    return [
+        {key: cookie.get(key) for key in safe_keys if key in cookie}
+        for cookie in cookies
+        if is_weread_cookie(cookie)
+    ]
 
 
 def save_cookie_files(cookie_string: str, cookies: List[Dict[str, Any]], cookie_file: Optional[Path], raw_cookie_file: Optional[Path]) -> None:
+    cookie_string = sanitize_cookie_header(cookie_string)
     if cookie_file:
         write_private_text(cookie_file, cookie_string)
     if raw_cookie_file:
@@ -125,18 +162,23 @@ def save_cookie_files(cookie_string: str, cookies: List[Dict[str, Any]], cookie_
 
 
 def save_manual_cookie(cookie_string: str, cookie_file: Optional[Path], raw_cookie_file: Optional[Path]) -> None:
+    cookie_string = sanitize_cookie_header(cookie_string)
     if cookie_file:
         write_private_text(cookie_file, cookie_string)
     if raw_cookie_file:
         write_private_text(
             raw_cookie_file,
-            json.dumps({"source": "manual_cookie", "note": "手动粘贴的 Cookie 只保存请求头字符串。"}, ensure_ascii=False, indent=2),
+            json.dumps(
+                {"source": "manual_cookie", "note": "凭证值未写入此元数据文件。"},
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
 
 
 def make_session(cookie_string: str) -> requests.Session:
     session = requests.Session()
-    session.cookies.update(cookie_string_to_dict(cookie_string))
+    session.cookies.update(cookie_string_to_dict(sanitize_cookie_header(cookie_string)))
     session.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -873,6 +915,90 @@ def write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) -> 
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def get_manifest_path(args: argparse.Namespace, out_dir: Path) -> Path:
+    path = Path(args.manifest)
+    return path if path.is_absolute() else out_dir / path
+
+
+def output_reference(path: Path, out_dir: Path) -> str:
+    """Return a share-safe output reference without exposing an absolute local path."""
+    try:
+        return str(path.resolve().relative_to(out_dir.resolve()))
+    except ValueError:
+        return path.name
+
+
+def completion_status(requested: int, failed: int) -> str:
+    if failed <= 0:
+        return "complete"
+    if requested > 0 and failed >= requested:
+        return "failure"
+    return "partial"
+
+
+def build_run_manifest(
+    *,
+    status: str,
+    mode: str,
+    input_record: Dict[str, Any],
+    counts: Dict[str, int],
+    failed_items: Optional[List[Dict[str, Any]]] = None,
+    outputs: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    if status not in {"complete", "partial", "failure"}:
+        raise ValueError(f"unsupported manifest status: {status}")
+    return {
+        "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
+        "kind": "weread-calendar.run",
+        "tool": {"name": TOOL_NAME, "version": TOOL_VERSION},
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "status": status,
+        "mode": mode,
+        "input": input_record,
+        "counts": counts,
+        "failed_items": failed_items or [],
+        "outputs": outputs or [],
+    }
+
+
+def write_run_manifest(path: Path, manifest: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def manifest_error_code(value: Any) -> str:
+    text = str(value or "").lower()
+    if "errcode=-2012" in text or "登录" in text:
+        return "authentication_error"
+    if "timeout" in text or "超时" in text:
+        return "timeout"
+    if "http" in text:
+        return "http_error"
+    if "json" in text:
+        return "invalid_response"
+    return "request_error"
+
+
+def manifest_failed_items(error_books: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    items = []
+    for row in error_books:
+        items.append({
+            "item_id": str(row.get("bookId") or ""),
+            "error_code": manifest_error_code(row.get("error")),
+        })
+    return items
 
 
 def parse_iso_date(value: Any) -> Optional[Any]:
@@ -2320,6 +2446,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--login-timeout", type=int, default=180, help="扫码登录等待秒数")
     parser.add_argument("--headless", action="store_true", help="Playwright 无头模式。首次扫码不要开这个")
     parser.add_argument("--out-dir", type=str, default="weread_export", help="输出目录")
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default="weread_run_manifest.json",
+        help="版本化运行完成度 manifest；相对路径默认写入 out-dir",
+    )
     parser.add_argument("--output-csv", type=str, default="weread_daily_reading.csv", help="每日阅读 CSV 文件名")
     parser.add_argument("--from-csv", type=str, default="", help="只从已有每日阅读 CSV 生成 HTML 报告，不重新登录抓取")
     parser.add_argument("--report-html", type=str, default="reading_report.html", help="阅读报告 HTML 文件名")
@@ -2680,10 +2812,7 @@ def launch_gui() -> None:
     root.mainloop()
 
 
-def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-
+def run(args: argparse.Namespace) -> None:
     if args.gui:
         launch_gui()
         return
@@ -2693,6 +2822,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.save_raw:
         raw_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = get_manifest_path(args, out_dir)
 
     report_html = Path(args.report_html)
     if not report_html.is_absolute():
@@ -2711,9 +2841,36 @@ def main() -> None:
             if not zip_path.is_absolute():
                 zip_path = Path(args.out_dir) / zip_path
             zip_output = create_zip_archive(png_outputs, zip_path)
+        outputs = [{"kind": "html_report", "path": output_reference(report_html, out_dir)}]
+        outputs.extend(
+            {"kind": "png", "path": output_reference(path, out_dir)}
+            for path in png_outputs
+        )
+        if zip_output:
+            outputs.append({"kind": "png_archive", "path": output_reference(zip_output, out_dir)})
+        normalized_rows = normalize_report_rows(rows)
+        write_run_manifest(
+            manifest_path,
+            build_run_manifest(
+                status="complete",
+                mode="offline_csv",
+                input_record={
+                    "kind": "daily_csv",
+                    "name": csv_path.name,
+                    "sha256": file_sha256(csv_path),
+                },
+                counts={
+                    "input_rows": len(rows),
+                    "report_rows": len(normalized_rows),
+                    "failed_items": 0,
+                },
+                outputs=outputs,
+            ),
+        )
         print("报告生成完成：")
         print(f"- 来源 CSV：{csv_path}")
         print(f"- HTML 报告：{report_html}")
+        print(f"- 完成度 manifest：{manifest_path}")
         if png_outputs:
             print(f"- PNG 输出：{png_outputs[0].parent}")
         if zip_output:
@@ -2722,7 +2879,7 @@ def main() -> None:
 
     cookie_string = get_cookie_string(args, out_dir)
     if not cookie_string:
-        raise SystemExit("Cookie 为空，已退出。")
+        raise RuntimeError("Cookie 为空，已退出。")
 
     session = make_session(cookie_string)
     print("正在获取书单...")
@@ -2762,7 +2919,8 @@ def main() -> None:
         output_csv = out_dir / output_csv
     write_csv(output_csv, daily_rows, daily_fields)
 
-    if not args.no_report or args.export_png != "none":
+    report_generated = not args.no_report or args.export_png != "none"
+    if report_generated:
         generate_reading_report_html(daily_rows, report_html)
     png_outputs: List[Path] = []
     zip_output = None
@@ -2787,8 +2945,48 @@ def main() -> None:
         write_csv(out_dir / "weread_book_sources.csv", books, ["bookId", "title", "cleanTitle", "author", "cover", "noteCount", "reviewCount", "source"])
         write_csv(out_dir / "weread_book_source_status.csv", source_rows, ["source", "status", "book_count", "error"])
 
+    source_failures = [row for row in source_rows if row.get("status") != "ok"]
+    status = completion_status(len(books), len(error_books))
+    if source_failures and status == "complete":
+        status = "failure" if not books else "partial"
+    failed_items = manifest_failed_items(error_books)
+    failed_items.extend(
+        {
+            "item_id": f"source:{row.get('source') or 'unknown'}",
+            "error_code": manifest_error_code(row.get("error")),
+        }
+        for row in source_failures
+    )
+    outputs = [{"kind": "daily_csv", "path": output_reference(output_csv, out_dir)}]
+    if report_generated:
+        outputs.append({"kind": "html_report", "path": output_reference(report_html, out_dir)})
+    outputs.extend({"kind": "png", "path": output_reference(path, out_dir)} for path in png_outputs)
+    if zip_output:
+        outputs.append({"kind": "png_archive", "path": output_reference(zip_output, out_dir)})
+    if args.save_monthly:
+        outputs.append({"kind": "monthly_csv", "path": output_reference(monthly_csv, out_dir)})
+    write_run_manifest(
+        manifest_path,
+        build_run_manifest(
+            status=status,
+            mode="online_export",
+            input_record={"kind": "weread_account", "book_source": args.book_source},
+            counts={
+                "requested_books": len(books),
+                "completed_books": max(0, len(books) - len(error_books)),
+                "failed_books": len(error_books),
+                "source_failures": len(source_failures),
+                "daily_rows": len(daily_rows),
+                "undated_books": len(undated_books),
+            },
+            failed_items=failed_items,
+            outputs=outputs,
+        ),
+    )
+
     print("\n导出完成：")
     print(f"- 每日阅读 CSV：{output_csv}")
+    print(f"- 完成度 manifest：{manifest_path}")
     if not args.no_report:
         print(f"- HTML 报告：{report_html}")
     if png_outputs:
@@ -2816,6 +3014,44 @@ def main() -> None:
     print(f"有总时长但无法落到日期的时长：{format_duration(undated_gap_seconds)}")
     if error_books and not args.allow_partial:
         raise SystemExit(1)
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.gui:
+        run(args)
+        return
+
+    out_dir = Path(args.out_dir)
+    manifest_path = get_manifest_path(args, out_dir)
+    try:
+        run(args)
+    except Exception as error:
+        mode = "offline_csv" if args.from_csv else "online_export"
+        input_record: Dict[str, Any]
+        if args.from_csv:
+            input_record = {"kind": "daily_csv", "name": Path(args.from_csv).name}
+        else:
+            input_record = {"kind": "weread_account", "book_source": args.book_source}
+        try:
+            write_run_manifest(
+                manifest_path,
+                build_run_manifest(
+                    status="failure",
+                    mode=mode,
+                    input_record=input_record,
+                    counts={"failed_items": 1},
+                    failed_items=[{
+                        "item_id": "run",
+                        "stage": "run",
+                        "error_type": type(error).__name__,
+                    }],
+                ),
+            )
+            print(f"完成度 manifest：{manifest_path}", file=sys.stderr)
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":
