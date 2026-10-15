@@ -45,7 +45,7 @@ MANUAL_COOKIE_HELP = """
 5. 重新运行本脚本，使用交互提示粘贴；不要把 Cookie 放进命令行参数
 """.strip()
 
-COVER_HOST_SUFFIXES = ("qq.com", "qpic.cn", "gtimg.com")
+COVER_HOST_SUFFIXES = ("qq.com", "qpic.cn", "gtimg.com", "myqcloud.com")
 COVER_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 PROMO_KEYWORDS = [
@@ -1359,6 +1359,10 @@ def generate_reading_report_html(rows: List[Dict[str, Any]], output_path: Path) 
     report_rows = normalize_report_rows(rows)
     if not report_rows:
         raise RuntimeError("没有可用于生成报告的每日阅读数据。")
+
+    # 把远程书封内嵌为 data URI，避免离线打开 HTML 或截图导出 PNG 时封面加载失败，
+    # 也保证浏览器内“下载 PNG”不会把外链图片替换成首字占位封面。
+    embed_report_cover_data(report_rows)
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     data_json = json.dumps(report_rows, ensure_ascii=False).replace("</", "<\\/")
