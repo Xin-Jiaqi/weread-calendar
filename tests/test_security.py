@@ -39,9 +39,12 @@ def test_manual_cookie_header_is_reduced_before_use() -> None:
 def test_cover_url_requires_https_and_trusted_host() -> None:
     assert app.normalize_cover_url("https://cdn.weread.qq.com/cover.jpg")
     assert app.normalize_cover_url("//cdn.weread.qq.com/cover.jpg").startswith("https://")
+    assert app.normalize_cover_url("https://wfqqreader-1252317822.image.myqcloud.com/cover/654/33091654/s_33091654.jpg")
     assert app.normalize_cover_url("http://cdn.weread.qq.com/cover.jpg") == ""
     assert app.normalize_cover_url("https://evil.example/cover.jpg") == ""
     assert app.normalize_cover_url("https://weread.qq.com.evil.example/cover.jpg") == ""
+    assert app.normalize_cover_url("https://myqcloud.com.evil.example/cover.jpg") == ""
+    assert app.normalize_cover_url("https://evilmyqcloud.com/cover.jpg") == ""
 
 
 def test_cookie_files_are_private_and_raw_metadata_has_no_values(tmp_path: Path) -> None:
